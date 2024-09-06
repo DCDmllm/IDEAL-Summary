@@ -1,0 +1,10 @@
+bert-score
+fairscale
+fire==0.6.0
+flash-attn==2.5.8
+joblib
+nltk
+rouge_score
+tiktoken==0.4.0
+torch
+transformers
