@@ -1,6 +1,6 @@
 # IDEAL_Summary
 **IDEAL: Leveraging Infinite and Dynamic Characterizations of Large Language Models for Query-focused Summarization**
-<img src="Ideal_summary.png"  width="90%">
+<img src="Ideal_summary.svg"  width="90%">
 
 ## Getting Started
 
