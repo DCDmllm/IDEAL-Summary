@@ -13,6 +13,7 @@ from torch import autograd
 
 from typing import List
 import math
+import random
 
 class LLaMA_adapter(nn.Module):
 
@@ -23,6 +24,13 @@ class LLaMA_adapter(nn.Module):
         with open(os.path.join(llama_ckpt_dir, "params.json"), "r") as f:
             params = json.loads(f.read())
         
+        if args.bf16 and torch.cuda.is_bf16_supported():
+            bf16=True
+        else:
+            bf16=False
+            if args.bf16:
+                print('------bfloat16 is not supported-----')
+        
         model_args: ModelArgs = ModelArgs(
             max_seq_len=args.max_seq_len,
             max_batch_size=args.max_batch_size,
@@ -31,9 +39,11 @@ class LLaMA_adapter(nn.Module):
             n_hyper_lora_layers = args.n_hyper_lora_layers,
             lora_rank = args.lora_rank,
             lora_targets = args.lora_targets,
+            hyper_input_type = args.hyper_input_type,
             serial_generate=args.serial_generate,
             common_encoder=args.common_encoder,
             flash_attention2=args.flash_attention2,
+            bf16=bf16,
             **params
         ) # max_batch_size only affects inferenc
         self.model_args = model_args
@@ -43,9 +53,20 @@ class LLaMA_adapter(nn.Module):
 
         # 5. llama
         assert model_args.vocab_size == self.tokenizer.n_words
-        torch.set_default_tensor_type(torch.cuda.HalfTensor)
+        # torch.set_default_tensor_type(torch.cuda.HalfTensor)
+        if model_args.bf16:
+            torch.set_default_dtype(torch.bfloat16)
+            print('-----bfloat16 for llama-----')
+        else:
+            torch.set_default_dtype(torch.float16)
+            print('-------float16 for llama-----')
+        torch.set_default_device('cuda')  # loading llama faster with GPU
+
         self.llama = Transformer(model_args)
-        torch.set_default_tensor_type(torch.FloatTensor)
+
+        # torch.set_default_tensor_type(torch.FloatTensor)
+        torch.set_default_dtype(torch.float32)
+        torch.set_default_device('cpu')
 
         ckpts = sorted(Path(llama_ckpt_dir).glob("*.pth"))
         for ckpt in ckpts:
@@ -56,8 +77,10 @@ class LLaMA_adapter(nn.Module):
         # lora
         self.hyper_lora_layers_id = self.llama.hyper_lora_layers_id
         self.hyper_lora_start = None
+        self.hyper_lora_end = None
         if self.hyper_lora_layers_id:
             self.hyper_lora_start = self.hyper_lora_layers_id[0]
+            self.hyper_lora_end = self.hyper_lora_layers_id[-1]+1
             self.serial_generate = model_args.serial_generate
             self.common_encoder = model_args.common_encoder
             self.hyper_input_type = model_args.hyper_input_type
@@ -103,8 +126,9 @@ class LLaMA_adapter(nn.Module):
         mask = torch.full((1, 1, seqlen, seqlen), float("-inf"), device=h.device)
         mask = torch.triu(mask, diagonal=0 + 1).type_as(h)
         
+        start_pos = 0
         for layer in self.llama.layers[:self.hyper_lora_start]:
-            h = layer(h, 0, freqs_cis, mask)
+            h = layer(h, start_pos, freqs_cis, mask)
         
         if self.hyper_lora_start:
             if self.hyper_input_type == 'both':
@@ -120,15 +144,15 @@ class LLaMA_adapter(nn.Module):
 
                 params = self.lora_hyper_net(pooling_states.detach()) # 不回传梯度效果略好
 
-                for hi,layer in enumerate(self.llama.layers[self.hyper_lora_start:]):
+                for hi,layer in enumerate(self.llama.layers[self.hyper_lora_start:self.hyper_lora_end]):
                     param = params[hi]
                     layer.apply_lora_params(param[0], param[1], param[2], param[3], param[4], param[5])
 
-                for layer in self.llama.layers[self.hyper_lora_start:]:
-                    h = layer(h, 0, freqs_cis, mask)
+                for layer in self.llama.layers[self.hyper_lora_start:self.hyper_lora_end]:
+                    h = layer(h, start_pos, freqs_cis, mask)
 
             else:  # serial generate params
-                for i,layer in enumerate(self.llama.layers[self.hyper_lora_start:]):
+                for i,layer in enumerate(self.llama.layers[self.hyper_lora_start:self.hyper_lora_end]):
                     pooling_states = torch.sum(h * prompt_mask.unsqueeze(-1), dim=1) / denom
                     if self.hyper_input_type == 'both':
                         pooling_states1 = torch.sum(h * prompt_mask1.unsqueeze(-1), dim=1) / denom1
@@ -136,7 +160,11 @@ class LLaMA_adapter(nn.Module):
                     param = self.lora_hyper_net(pooling_states.detach(), hyper_index=i)
                     layer.apply_lora_params(param[0], param[1], param[2], param[3], param[4], param[5])
 
-                    h = layer(h, 0, freqs_cis, mask)
+                    h = layer(h, start_pos, freqs_cis, mask)
+        
+        if self.hyper_lora_end:
+            for layer in self.llama.layers[self.hyper_lora_end:]:
+                h = layer(h, start_pos, freqs_cis, mask)
 
         h = self.llama.norm(h)
 
@@ -187,18 +215,24 @@ class LLaMA_adapter(nn.Module):
                     if self.hyper_input_type == 'both':
                         pooling_states1 = torch.sum(h * prompt_mask1.unsqueeze(-1), dim=1) / denom1
                         pooling_states = torch.cat((pooling_states, pooling_states1), -1)
-
+                    # print(f'pooling_states:{pooling_states}')
                     params = self.lora_hyper_net(pooling_states.detach()) # 不回传梯度效果略好
+                    # save params
+                    # random_id = random.randint(1,10e6)
+                    # torch.save(params,f'/home2/caojie/outputs/LLaMA3-1-Lora-hyper/CovidET/gen_params/{random_id}.pth')
+                    # torch.save(params,f'/home2/caojie/outputs/LLaMA3-1-Lora-hyper/QMSum_gold_clean/gen_params/{random_id}.pth')
+                    # torch.save(params,f'/home2/caojie/outputs/LLaMA3-1-Lora-hyper/QMSum/gen_params/{random_id}.pth')
+                    # torch.save(params,f'/home2/caojie/outputs/LLaMA3-1-Lora-hyper/SQuALITY/gen_params/{random_id}.pth')
 
-                    for hi,layer in enumerate(self.llama.layers[self.hyper_lora_start:]):
+                    for hi,layer in enumerate(self.llama.layers[self.hyper_lora_start:self.hyper_lora_end]):
                         param = params[hi]
                         layer.apply_lora_params(param[0], param[1], param[2], param[3], param[4], param[5])
 
-                for layer in self.llama.layers[self.hyper_lora_start:]:
+                for layer in self.llama.layers[self.hyper_lora_start:self.hyper_lora_end]:
                     h = layer(h, start_pos, freqs_cis, mask)
 
-            else:  # serial generate params
-                for i,layer in enumerate(self.llama.layers[self.hyper_lora_start:]):
+            else:  # sequential generate params
+                for i,layer in enumerate(self.llama.layers[self.hyper_lora_start:self.hyper_lora_end]):
                     if start_pos == 0:
                         pooling_states = torch.sum(h * prompt_mask.unsqueeze(-1), dim=1) / denom
                         if self.hyper_input_type == 'both':
@@ -208,6 +242,10 @@ class LLaMA_adapter(nn.Module):
                         layer.apply_lora_params(param[0], param[1], param[2], param[3], param[4], param[5])
 
                     h = layer(h, start_pos, freqs_cis, mask)
+
+        if self.hyper_lora_end:
+            for layer in self.llama.layers[self.hyper_lora_end:]:
+                h = layer(h, start_pos, freqs_cis, mask)
 
         h = self.llama.norm(h)
 
@@ -245,7 +283,11 @@ class LLaMA_adapter(nn.Module):
         start_pos = min_prompt_size
         prev_pos = 0
         for cur_pos in range(start_pos, total_len):
-            with torch.cuda.amp.autocast():
+            if params.bf16:
+                dt = torch.bfloat16
+            else:
+                dt = torch.float16
+            with torch.cuda.amp.autocast(dtype=dt):
                 if prev_pos == 0:
                     prompt_mask=input_text_mask[:, prev_pos:cur_pos].float() # hyper_input_type == all
                     if hyper_input_type in ('instruction', 'document'): #  input of hypernet only instruction

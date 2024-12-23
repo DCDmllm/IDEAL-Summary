@@ -37,42 +37,55 @@ def setup_model_parallel() -> Tuple[int, int]:
     torch.manual_seed(1)
     return local_rank, world_size
 
-def load(llama_path, adapter_path: str, max_batch_size: int = 32):
+def load(llama_path, adapter_path: str, max_seq_len=None, max_batch_size: int = 32):
     start_time = time.time()
     # device="cuda" if torch.cuda.is_available() else "cpu"
     # load llama_adapter weights and model_cfg
     print(f'Loading LLaMA-Adapter from {adapter_path}')
-    adapter_ckpt = torch.load(adapter_path, map_location='cpu')
+    if os.path.isfile(adapter_path):
+        adapter_ckpt = torch.load(adapter_path, map_location='cpu')
 
-    # adapter params
-    with open(os.path.join(os.path.dirname(adapter_path), 'adapter_params.json'), 'r') as f:
-        adapter_params = json.loads(f.read())
+        # adapter params
+        with open(os.path.join(os.path.dirname(adapter_path), 'adapter_params.json'), 'r') as f:
+            adapter_params = json.loads(f.read())
 
-    adapter_params['max_batch_size'] = max_batch_size
-    model_args: ModelArgs = ModelArgs(
-        **adapter_params
-    )
+        if max_seq_len and (max_seq_len > adapter_params['max_seq_len']):
+            adapter_params['max_seq_len'] = max_seq_len
+
+        adapter_params['max_batch_size'] = max_batch_size
+        model_args: ModelArgs = ModelArgs(
+            **adapter_params
+        )
+    else: # origin llama
+        model_args: ModelArgs = ModelArgs(
+            max_seq_len=max_seq_len,
+            max_batch_size=max_batch_size,
+            n_lora_layers = '0-0',
+            n_hyper_lora_layers = '0-0',
+            flash_attention2=False,
+            bf16=True,
+        )
 
     llama_type = ''
     llama_ckpt_dir = os.path.join(llama_path, llama_type)
     llama_tokenzier_path = os.path.join(llama_path, 'tokenizer.model')
     model = LLaMA_adapter(model_args, llama_ckpt_dir, llama_tokenzier_path)
 
-    load_result = model.load_state_dict(adapter_ckpt, strict=False)
-    
-    # save number of trainable parameters
-    trainable_params_sum = 0
-    trainable_params_kv = []
-    for key, val in model.named_parameters():
-        if val.requires_grad:
-            trainable_params_kv.append((key, val.shape))
-            trainable_params_sum += torch.numel(val)
-    trainable = {'trainable_params': trainable_params_sum,
-                 'trainable_params_kv': trainable_params_kv}
-    with open(os.path.join(os.path.dirname(adapter_path), 'trainable.json'), 'w') as f:
-        f.write(json.dumps(trainable, ensure_ascii=False))
+    if os.path.isfile(adapter_path):
+        load_result = model.load_state_dict(adapter_ckpt, strict=False)
+        assert len(load_result.unexpected_keys) == 0, f"Unexpected keys: {load_result.unexpected_keys}"
 
-    assert len(load_result.unexpected_keys) == 0, f"Unexpected keys: {load_result.unexpected_keys}"
+        # save number of trainable parameters
+        trainable_params_sum = 0
+        trainable_params_kv = []
+        for key, val in model.named_parameters():
+            if val.requires_grad:
+                trainable_params_kv.append((key, val.shape))
+                trainable_params_sum += torch.numel(val)
+        trainable = {'trainable_params': trainable_params_sum,
+                    'trainable_params_kv': trainable_params_kv}
+        with open(os.path.join(os.path.dirname(adapter_path), 'trainable.json'), 'w') as f:
+            f.write(json.dumps(trainable, ensure_ascii=False))
 
     print(f"Loaded in {time.time() - start_time:.2f} seconds")
     # return model.to(device)
@@ -87,6 +100,7 @@ def main(
     adapter_path: str,
     data_path: str,
     save_path:str,
+    max_seq_len = None,
     temperature: float = 0.1,
     top_p: float = 0.75,
     max_gen_len: int = 128,
@@ -97,7 +111,7 @@ def main(
     if local_rank > 0:
         sys.stdout = open(os.devnull, "w")
 
-    model = load(ckpt_dir, adapter_path, max_batch_size)
+    model = load(ckpt_dir, adapter_path, max_seq_len=max_seq_len, max_batch_size=max_batch_size)
     model.eval()
 
     ann = []
@@ -131,10 +145,13 @@ def main(
     # batchs = [ann[47:57]]
 
     # generate params
-    with open(os.path.join(os.path.dirname(adapter_path), 'generate_params.json'), 'r') as f:
-        generate_params = json.loads(f.read())
-        max_seq_len = generate_params['max_seq_len']
-        hyper_input_type = generate_params['hyper_input_type']
+    # with open(os.path.join(os.path.dirname(adapter_path), 'generate_params.json'), 'r') as f:
+    #     generate_params = json.loads(f.read())
+    #     max_seq_len = generate_params['max_seq_len']
+    #     hyper_input_type = generate_params['hyper_input_type']
+
+    max_seq_len = model.llama.params.max_seq_len
+    hyper_input_type = model.llama.params.hyper_input_type
 
     directory = os.path.dirname(save_path)
     if not os.path.exists(directory):

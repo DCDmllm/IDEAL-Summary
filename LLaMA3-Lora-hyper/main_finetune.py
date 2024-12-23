@@ -43,6 +43,7 @@ def get_args_parser():
     parser.add_argument('--max_batch_size', default=32, type=int, help='')
     parser.add_argument('--loss_only_labels', type=str2bool, nargs='?', const=True, default=True, help='compute loss only on label tokens or all tokens')
     parser.add_argument('--flash_attention2', type=str2bool, nargs='?', const=True, default=False, help='flash attention 2')
+    parser.add_argument('--bf16', type=str2bool, nargs='?', const=True, default=False, help='bf16 if GPU support')
 
     # lora
     parser.add_argument('--w_bias', default=False, type=bool, help='bias tuning')
@@ -53,8 +54,8 @@ def get_args_parser():
     # hyper
     parser.add_argument('--n_hyper_lora_layers', default='24-32', type=str, help="")
     parser.add_argument("--hyper_input_type", type=str, default='instruction', help="input of hypernetwork： instruction, document, both, all")
-    parser.add_argument("--serial_generate", action='store_true', default=False, help="generate hyper adapter in serial or parallel order")
-    parser.add_argument("--common_encoder", action='store_true', default=False, help="generate hyper adapter use common encoder")
+    parser.add_argument("--serial_generate", type=str2bool, nargs='?', const=True, default=False, help="generate hyper adapter in serial or parallel order")
+    parser.add_argument("--common_encoder", type=str2bool, nargs='?', const=True, default=False, help="generate hyper adapter use common encoder")
     
     # Optimizer parameters
     parser.add_argument('--weight_decay', type=float, default=0.05,

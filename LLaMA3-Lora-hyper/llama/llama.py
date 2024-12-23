@@ -23,6 +23,7 @@ class ModelArgs:
     ffn_dim_multiplier: Optional[float] = None
     norm_eps: float = 1e-5
     rope_theta: float = 500000
+    use_scaled_rope: Optional[bool] = False
 
     max_batch_size: int = 32
     max_seq_len: int = 2048
@@ -32,8 +33,8 @@ class ModelArgs:
     lora_rank: int = 16
     lora_targets: str = 'Q,K,V,O,FFN_UP,FFN_DOWN'
 
-    # flash attention
     flash_attention2: bool = False
+    bf16: bool = False
 
     # hyper
     hyper_input_type: str = 'instruction'
@@ -85,10 +86,39 @@ class RMSNorm(torch.nn.Module):
         return output * self.weight
 
 
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
+def apply_scaling(freqs: torch.Tensor):
+    # Values obtained from grid search
+    scale_factor = 8
+    low_freq_factor = 1
+    high_freq_factor = 4
+    old_context_len = 8192  # original llama3 length
+
+    low_freq_wavelen = old_context_len / low_freq_factor
+    high_freq_wavelen = old_context_len / high_freq_factor
+    new_freqs = []
+    for freq in freqs:
+        wavelen = 2 * math.pi / freq
+        if wavelen < high_freq_wavelen:
+            new_freqs.append(freq)
+        elif wavelen > low_freq_wavelen:
+            new_freqs.append(freq / scale_factor)
+        else:
+            assert low_freq_wavelen != high_freq_wavelen
+            smooth = (old_context_len / wavelen - low_freq_factor) / (
+                high_freq_factor - low_freq_factor
+            )
+            new_freqs.append((1 - smooth) * freq / scale_factor + smooth * freq)
+    return torch.tensor(new_freqs, dtype=freqs.dtype, device=freqs.device)
+
+
+def precompute_freqs_cis(
+    dim: int, end: int, theta: float = 10000.0, use_scaled: bool = False
+):
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    t = torch.arange(end, device=freqs.device)  # type: ignore
-    freqs = torch.outer(t, freqs).float()  # type: ignore
+    t = torch.arange(end, device=freqs.device, dtype=torch.float32)
+    if use_scaled:
+        freqs = apply_scaling(freqs)
+    freqs = torch.outer(t, freqs)
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
     return freqs_cis
 
@@ -328,6 +358,7 @@ class TransformerBlock(nn.Module):
         super().__init__()
         # self.n_heads = args.n_heads
         self.dim = args.dim
+        self.bf16 = args.bf16
         # self.head_dim = args.dim // args.n_heads
         self.attention = Attention(args, flash_attention2=flash_attention2, w_lora=w_lora, hyper_lora=hyper_lora)
         self.feed_forward = FeedForward(
@@ -342,7 +373,8 @@ class TransformerBlock(nn.Module):
         h = x + self.attention.forward(self.attention_norm(x), start_pos, freqs_cis, mask)
         out = h + self.feed_forward.forward(self.ffn_norm(h))
 
-        out = out.clamp(min=-65500, max=65500)
+        if not self.bf16:
+            out = out.clamp(min=-65500, max=65500)
         return out
     
     def apply_lora_params(self, q_l1=None, k_l1=None, v_l1=None, o_l1=None, ffn_up_l1=None, ffn_down_l1=None):
@@ -415,6 +447,7 @@ class Transformer(nn.Module):
             params.dim // params.n_heads,
             params.max_seq_len * 2,
             params.rope_theta,
+            params.use_scaled_rope,
         )
 
     @torch.inference_mode()

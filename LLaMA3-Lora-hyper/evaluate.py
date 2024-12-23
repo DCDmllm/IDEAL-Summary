@@ -57,8 +57,11 @@ def rouge(predict_file: str):
     print(result)
     return result
 
-def bart_score(predict_file: str, bscore_path:str):
-    scorer = BERTScorer(model_type=bscore_path, num_layers=6, device='cuda',
+def bert_score(predict_file: str, bscore_path:str):
+    num_layers=17 # roberta-large
+    if 'bart_base' in bscore_path:
+        num_layers=6
+    scorer = BERTScorer(model_type=bscore_path, num_layers=num_layers, device='cuda',
                         batch_size=256,
                         nthreads=8,
                         # idf=True,
@@ -85,9 +88,9 @@ def bart_score(predict_file: str, bscore_path:str):
 
 def main(predict_file:str, bscore_path:str):
     result = rouge(predict_file=predict_file)
-    bart_s = bart_score(predict_file=predict_file, bscore_path=bscore_path)
-    print(f'bart_score:{bart_s}')
-    result['bart_score'] = bart_s
+    bert_s = bert_score(predict_file=predict_file, bscore_path=bscore_path)
+    print(f'bert_score:{bert_s}')
+    result['bert_score'] = bert_s
     result['predict_file'] = predict_file
     directory = os.path.dirname(predict_file)
     directory = os.path.dirname(directory)

@@ -39,6 +39,7 @@ def main(
     adapter_params['hyper_input_type'] = args.hyper_input_type
     adapter_params['max_seq_len'] = args.max_seq_len
     adapter_params['flash_attention2'] = args.flash_attention2
+    adapter_params['bf16'] = args.bf16
 
     print(f'adapter params:{adapter_params}')
     with open(os.path.join(directory,'adapter_params.json'), 'w', encoding='utf-8') as f:
