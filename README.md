@@ -5,8 +5,8 @@
 
 ### 1. Installation
 ```bash
-conda create --name ideal_summary python=3.9
-conda activate ideal_summary
+conda create --name summary python=3.9
+conda activate summary
 pip install -r requirement.txt
 ```
 ### Prepare pretrain model weights
