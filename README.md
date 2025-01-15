@@ -1,4 +1,4 @@
-# IDEAL_Summary
+
 <img src="Ideal_summary.svg"  width="90%">
 
 ## Getting Started
