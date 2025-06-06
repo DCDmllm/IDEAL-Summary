@@ -37,7 +37,6 @@ For multi-reference Rouge scores and Bert-score evaluations on the SQuALITY data
 - **`output/LLaMA3-lora-hyper`**: Contains the results of IDEAL_lora (based on LLaMA3.1-8B).
 - **`output/GPTRank`**: Contains the results of IDEAL_LoRA and Socratic on the Squality dataset (aligned with the original test set order), as well as the comparison results of the two methods' summaries using GPTRank.
 
-This structure organizes the outputs clearly for easy reference and comparison.
 ## Acknowledgment
 Our project is developed based on the following repositories:
 
